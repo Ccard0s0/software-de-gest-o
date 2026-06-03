@@ -1,10 +1,15 @@
 {
   "version": 2,
-  "cleanUrls": true,
+  "builds": [
+    {
+      "src": "src/server.ts",
+      "use": "@vercel/node"
+    }
+  ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "/"
+      "dest": "src/server.ts"
     }
   ]
 }
