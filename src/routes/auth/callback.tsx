@@ -10,15 +10,19 @@ function AuthCallback() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
-      if (event === "SIGNED_IN") {
+    // Escuta mudanças no estado de auth
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log("Auth event:", event);
+      if (event === "SIGNED_IN" && session) {
         navigate({ to: "/home", replace: true });
       }
     });
 
-    // Also check current session in case it's already there
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) {
+    // Verificação inicial caso o redirect já tenha trazido a sessão
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (error) {
+        console.error("Erro ao obter sessão:", error.message);
+      } else if (data.session) {
         navigate({ to: "/home", replace: true });
       }
     });
@@ -28,7 +32,10 @@ function AuthCallback() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background">
-      <div className="h-8 w-8 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground" />
+      <div className="text-center">
+        <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground" />
+        <p>A validar autenticação...</p>
+      </div>
     </div>
   );
 }
