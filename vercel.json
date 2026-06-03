@@ -1,11 +1,5 @@
 {
   "version": 2,
   "cleanUrls": true,
-  "outputDirectory": "dist",
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
-    }
-  ]
+  "outputDirectory": ".output"
 }
