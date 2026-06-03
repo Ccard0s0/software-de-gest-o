@@ -21,7 +21,7 @@ import {
   Film,
   Archive,
 } from "lucide-react";
-import { useState, useRef, useCallback, DragEvent } from "react";
+import { useState, useRef, useCallback, useEffect, DragEvent } from "react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
@@ -34,8 +34,10 @@ export const Route = createFileRoute("/_authenticated/c/$slug")({
 type FolderRow = {
   id: string;
   name: string;
+  slug: string | null;
   parent_id: string | null;
   company_id: string;
+  sort_order: number;
 };
 
 type AssetRow = {
@@ -44,27 +46,48 @@ type AssetRow = {
   storage_path: string;
   category_id: string;
   company_id: string;
+  mime_type: string | null;
+  file_size: number | null;
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const IMAGE_EXTS = ["jpg", "jpeg", "png", "gif", "webp", "svg", "avif", "bmp"];
 const VIDEO_EXTS = ["mp4", "mov", "avi", "webm", "mkv"];
-const PDF_EXTS = ["pdf"];
-const ARCHIVE_EXTS = ["zip", "rar", "7z", "tar", "gz"];
 
 function fileCategory(name: string) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (IMAGE_EXTS.includes(ext)) return "image";
   if (VIDEO_EXTS.includes(ext)) return "video";
-  if (PDF_EXTS.includes(ext)) return "pdf";
-  if (ARCHIVE_EXTS.includes(ext)) return "archive";
+  if (ext === "pdf") return "pdf";
+  if (["zip", "rar", "7z", "tar", "gz"].includes(ext)) return "archive";
   return "file";
 }
 
-function getPublicUrl(path: string) {
-  const { data } = supabase.storage.from("brand-assets").getPublicUrl(path);
-  return data.publicUrl;
+/** Generate a URL-safe slug from any string, with a timestamp to avoid collisions */
+function generateSlug(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "") // strip accents (ã→a, ç→c, etc.)
+      .replace(/[^a-z0-9\s-]/g, "")
+      .trim()
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-") || "folder"
+  ) + `-${Date.now()}`;
+}
+
+/** Get a short-lived signed URL for a private-bucket file */
+async function getSignedUrl(path: string, expiresIn = 3600): Promise<string | null> {
+  const { data, error } = await supabase.storage
+    .from("brand-assets")
+    .createSignedUrl(path, expiresIn);
+  if (error) {
+    console.error("createSignedUrl error:", error.message);
+    return null;
+  }
+  return data.signedUrl;
 }
 
 // ─── ConfirmDialog ────────────────────────────────────────────────────────────
@@ -111,9 +134,30 @@ function FileCard({
   asset: AssetRow;
   onDelete: () => void;
 }) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
   const [imgError, setImgError] = useState(false);
   const category = fileCategory(asset.name);
-  const publicUrl = getPublicUrl(asset.storage_path);
+
+  // Fetch a signed URL for image/video previews (bucket is private)
+  useEffect(() => {
+    if (category !== "image") return;
+    setLoadingPreview(true);
+    getSignedUrl(asset.storage_path, 3600).then((url) => {
+      setPreviewUrl(url);
+      setLoadingPreview(false);
+    });
+  }, [asset.storage_path, category]);
+
+  const handleDownload = async () => {
+    const url = await getSignedUrl(asset.storage_path, 60);
+    if (!url) { toast.error("Erro ao gerar link de download"); return; }
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = asset.name;
+    a.target = "_blank";
+    a.click();
+  };
 
   const Icon =
     category === "image"
@@ -126,47 +170,57 @@ function FileCard({
             ? Archive
             : FileText;
 
+  const ext = asset.name.split(".").pop()?.toUpperCase() ?? "FILE";
+
   return (
     <div className="group relative bg-white border border-gray-100 rounded-xl overflow-hidden hover:border-gray-300 hover:shadow-md transition-all duration-200">
       {/* Preview */}
-      <div className="h-36 flex items-center justify-center bg-gray-50 overflow-hidden">
+      <div className="h-36 flex items-center justify-center bg-gray-50 overflow-hidden relative">
         {category === "image" && !imgError ? (
-          <img
-            src={publicUrl}
-            alt={asset.name}
-            className="w-full h-full object-cover"
-            onError={() => setImgError(true)}
-          />
+          loadingPreview ? (
+            <Loader2 className="h-6 w-6 text-gray-300 animate-spin" />
+          ) : previewUrl ? (
+            <img
+              src={previewUrl}
+              alt={asset.name}
+              className="w-full h-full object-cover"
+              onError={() => setImgError(true)}
+            />
+          ) : (
+            <Icon className="h-10 w-10 text-gray-300" strokeWidth={1.2} />
+          )
         ) : (
-          <Icon className="h-10 w-10 text-gray-300" strokeWidth={1.2} />
+          <div className="flex flex-col items-center gap-1">
+            <Icon className="h-10 w-10 text-gray-300" strokeWidth={1.2} />
+            <span className="text-[10px] text-gray-300 font-medium">{ext}</span>
+          </div>
         )}
       </div>
 
       {/* Info */}
       <div className="px-3 py-2.5">
-        <p
-          className="text-xs font-medium text-gray-700 truncate"
-          title={asset.name}
-        >
+        <p className="text-xs font-medium text-gray-700 truncate" title={asset.name}>
           {asset.name}
         </p>
         <p className="text-[10px] text-gray-400 mt-0.5 uppercase tracking-wide">
-          {asset.name.split(".").pop()}
+          {ext}
+          {asset.file_size && (
+            <span className="ml-1 normal-case">
+              · {(asset.file_size / 1024).toFixed(0)} KB
+            </span>
+          )}
         </p>
       </div>
 
       {/* Hover actions */}
       <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        <a
-          href={publicUrl}
-          download={asset.name}
-          target="_blank"
-          rel="noreferrer"
+        <button
+          onClick={handleDownload}
           className="h-7 w-7 flex items-center justify-center rounded-lg bg-white shadow border border-gray-100 hover:bg-gray-50 transition-colors"
           title="Descarregar"
         >
           <Download className="h-3.5 w-3.5 text-gray-600" />
-        </a>
+        </button>
         <button
           onClick={onDelete}
           className="h-7 w-7 flex items-center justify-center rounded-lg bg-white shadow border border-gray-100 hover:bg-red-50 hover:border-red-200 transition-colors"
@@ -186,17 +240,14 @@ type FolderItemProps = {
   allFolders: FolderRow[];
   activeFolderId: string | null;
   onSelectFolder: (id: string) => void;
-  // Editing
   editingId: string | null;
   editingName: string;
   onEditStart: (folder: FolderRow) => void;
   onEditChange: (name: string) => void;
   onEditConfirm: (id: string) => void;
   onEditCancel: () => void;
-  // Deleting
   onDeleteRequest: (id: string) => void;
-  // Creating child
-  creatingInParent: string | undefined; // folder id, or "root" for root level
+  creatingInParent: string | undefined;
   onCreateStart: (parentId: string) => void;
   newFolderName: string;
   onNewFolderNameChange: (v: string) => void;
@@ -206,43 +257,24 @@ type FolderItemProps = {
 };
 
 function FolderItem({
-  folder,
-  allFolders,
-  activeFolderId,
-  onSelectFolder,
-  editingId,
-  editingName,
-  onEditStart,
-  onEditChange,
-  onEditConfirm,
-  onEditCancel,
-  onDeleteRequest,
-  creatingInParent,
-  onCreateStart,
-  newFolderName,
-  onNewFolderNameChange,
-  onCreateConfirm,
-  onCreateCancel,
-  depth,
+  folder, allFolders, activeFolderId, onSelectFolder,
+  editingId, editingName, onEditStart, onEditChange, onEditConfirm, onEditCancel,
+  onDeleteRequest, creatingInParent, onCreateStart, newFolderName,
+  onNewFolderNameChange, onCreateConfirm, onCreateCancel, depth,
 }: FolderItemProps) {
   const [expanded, setExpanded] = useState(false);
-
   const children = allFolders.filter((f) => f.parent_id === folder.id);
   const isActive = activeFolderId === folder.id;
   const isEditing = editingId === folder.id;
   const isCreatingChild = creatingInParent === folder.id;
-
   const indent = 12 + depth * 14;
 
   return (
     <div>
-      {/* Row */}
       <div
         className={cn(
           "group flex items-center gap-1.5 py-1.5 pr-2 rounded-lg cursor-pointer text-sm transition-colors select-none",
-          isActive
-            ? "bg-gray-900 text-white"
-            : "hover:bg-gray-50 text-gray-700"
+          isActive ? "bg-gray-900 text-white" : "hover:bg-gray-50 text-gray-700"
         )}
         style={{ paddingLeft: `${indent}px` }}
         onClick={() => {
@@ -251,34 +283,22 @@ function FolderItem({
           if (children.length > 0) setExpanded((v) => !v);
         }}
       >
-        {/* Chevron (only if has children) */}
         <span className="w-4 shrink-0 flex items-center justify-center">
           {children.length > 0 && (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setExpanded((v) => !v);
-              }}
+              onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
               className="hover:opacity-70 transition-opacity"
             >
-              <ChevronRight
-                className={cn(
-                  "h-3.5 w-3.5 transition-transform",
-                  expanded && "rotate-90"
-                )}
-              />
+              <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", expanded && "rotate-90")} />
             </button>
           )}
         </span>
 
-        {/* Folder icon */}
-        {isActive && expanded ? (
-          <FolderOpen className="h-4 w-4 shrink-0" />
-        ) : (
-          <Folder className="h-4 w-4 shrink-0" />
-        )}
+        {isActive && expanded
+          ? <FolderOpen className="h-4 w-4 shrink-0" />
+          : <Folder className="h-4 w-4 shrink-0" />
+        }
 
-        {/* Name / edit input */}
         {isEditing ? (
           <Input
             autoFocus
@@ -292,75 +312,42 @@ function FolderItem({
             className="h-6 text-sm py-0 px-1.5 flex-1 min-w-0 bg-white text-gray-900 border-gray-300 rounded focus-visible:ring-0 focus-visible:ring-offset-0"
           />
         ) : (
-          <span className="flex-1 min-w-0 truncate font-medium">
-            {folder.name}
-          </span>
+          <span className="flex-1 min-w-0 truncate font-medium">{folder.name}</span>
         )}
 
-        {/* Edit confirm/cancel */}
         {isEditing && (
-          <div
-            className="flex gap-0.5 shrink-0"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              className="p-1 rounded hover:bg-green-100"
-              onClick={() => onEditConfirm(folder.id)}
-            >
+          <div className="flex gap-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+            <button className="p-1 rounded hover:bg-green-100" onClick={() => onEditConfirm(folder.id)}>
               <Check className="h-3 w-3 text-green-600" />
             </button>
-            <button
-              className="p-1 rounded hover:bg-red-100"
-              onClick={onEditCancel}
-            >
+            <button className="p-1 rounded hover:bg-red-100" onClick={onEditCancel}>
               <X className="h-3 w-3 text-red-500" />
             </button>
           </div>
         )}
 
-        {/* Hover actions */}
         {!isEditing && (
           <div
-            className={cn(
-              "flex gap-0.5 shrink-0 transition-opacity",
-              isActive
-                ? "opacity-0 group-hover:opacity-100"
-                : "opacity-0 group-hover:opacity-100"
-            )}
+            className="flex gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Add subfolder */}
             <button
               title="Nova subpasta"
-              className={cn(
-                "p-1 rounded transition-colors",
-                isActive ? "hover:bg-white/20" : "hover:bg-gray-200"
-              )}
-              onClick={() => {
-                setExpanded(true);
-                onCreateStart(folder.id);
-              }}
+              className={cn("p-1 rounded transition-colors", isActive ? "hover:bg-white/20" : "hover:bg-gray-200")}
+              onClick={() => { setExpanded(true); onCreateStart(folder.id); }}
             >
               <Plus className="h-3 w-3" />
             </button>
-            {/* Rename */}
             <button
               title="Renomear"
-              className={cn(
-                "p-1 rounded transition-colors",
-                isActive ? "hover:bg-white/20" : "hover:bg-gray-200"
-              )}
+              className={cn("p-1 rounded transition-colors", isActive ? "hover:bg-white/20" : "hover:bg-gray-200")}
               onClick={() => onEditStart(folder)}
             >
               <Pencil className="h-3 w-3" />
             </button>
-            {/* Delete */}
             <button
               title="Eliminar"
-              className={cn(
-                "p-1 rounded transition-colors",
-                isActive ? "hover:bg-red-500/40" : "hover:bg-red-100"
-              )}
+              className={cn("p-1 rounded transition-colors", isActive ? "hover:bg-red-500/40" : "hover:bg-red-100")}
               onClick={() => onDeleteRequest(folder.id)}
             >
               <Trash2 className="h-3 w-3 text-red-400" />
@@ -369,12 +356,8 @@ function FolderItem({
         )}
       </div>
 
-      {/* Inline new-subfolder input */}
       {isCreatingChild && (
-        <div
-          className="flex items-center gap-1.5 py-1 pr-2"
-          style={{ paddingLeft: `${indent + 20}px` }}
-        >
+        <div className="flex items-center gap-1.5 py-1 pr-2" style={{ paddingLeft: `${indent + 20}px` }}>
           <Folder className="h-4 w-4 text-gray-400 shrink-0" />
           <Input
             autoFocus
@@ -387,46 +370,38 @@ function FolderItem({
             className="h-6 text-sm py-0 px-1.5 flex-1 border-gray-300 rounded focus-visible:ring-0 focus-visible:ring-offset-0"
             placeholder="Nome da subpasta..."
           />
-          <button
-            className="p-1 rounded hover:bg-green-100"
-            onClick={onCreateConfirm}
-          >
+          <button className="p-1 rounded hover:bg-green-100" onClick={onCreateConfirm}>
             <Check className="h-3 w-3 text-green-600" />
           </button>
-          <button
-            className="p-1 rounded hover:bg-red-100"
-            onClick={onCreateCancel}
-          >
+          <button className="p-1 rounded hover:bg-red-100" onClick={onCreateCancel}>
             <X className="h-3 w-3 text-red-500" />
           </button>
         </div>
       )}
 
-      {/* Recursive children */}
-      {expanded &&
-        children.map((child) => (
-          <FolderItem
-            key={child.id}
-            folder={child}
-            allFolders={allFolders}
-            activeFolderId={activeFolderId}
-            onSelectFolder={onSelectFolder}
-            editingId={editingId}
-            editingName={editingName}
-            onEditStart={onEditStart}
-            onEditChange={onEditChange}
-            onEditConfirm={onEditConfirm}
-            onEditCancel={onEditCancel}
-            onDeleteRequest={onDeleteRequest}
-            creatingInParent={creatingInParent}
-            onCreateStart={onCreateStart}
-            newFolderName={newFolderName}
-            onNewFolderNameChange={onNewFolderNameChange}
-            onCreateConfirm={onCreateConfirm}
-            onCreateCancel={onCreateCancel}
-            depth={depth + 1}
-          />
-        ))}
+      {expanded && children.map((child) => (
+        <FolderItem
+          key={child.id}
+          folder={child}
+          allFolders={allFolders}
+          activeFolderId={activeFolderId}
+          onSelectFolder={onSelectFolder}
+          editingId={editingId}
+          editingName={editingName}
+          onEditStart={onEditStart}
+          onEditChange={onEditChange}
+          onEditConfirm={onEditConfirm}
+          onEditCancel={onEditCancel}
+          onDeleteRequest={onDeleteRequest}
+          creatingInParent={creatingInParent}
+          onCreateStart={onCreateStart}
+          newFolderName={newFolderName}
+          onNewFolderNameChange={onNewFolderNameChange}
+          onCreateConfirm={onCreateConfirm}
+          onCreateCancel={onCreateCancel}
+          depth={depth + 1}
+        />
+      ))}
     </div>
   );
 }
@@ -438,51 +413,40 @@ function ExplorerPage() {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // ── UI state ──────────────────────────────────────────────────────────────
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<{
-    done: number;
-    total: number;
-  } | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
 
-  // Folder edit
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
 
-  // Folder create — undefined = not creating; "root" = new root folder; string = parent folder id
-  const [creatingInParent, setCreatingInParent] = useState<
-    string | undefined
-  >(undefined);
+  // undefined = not creating; "root" = new root folder; string = parent folder id
+  const [creatingInParent, setCreatingInParent] = useState<string | undefined>(undefined);
   const [newFolderName, setNewFolderName] = useState("");
 
-  // Confirms
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null);
   const [deletingAsset, setDeletingAsset] = useState<AssetRow | null>(null);
 
   // ── Data ──────────────────────────────────────────────────────────────────
+
   const { data, isLoading } = useQuery({
     queryKey: ["explorer", slug],
     queryFn: async () => {
-      const { data: company, error } = await supabase
-        .from("companies")
-        .select("id")
-        .eq("slug", slug)
-        .single();
-      if (error || !company) throw new Error("Company not found");
+      const { data: company, error: companyError } = await supabase
+        .from("companies").select("id").eq("slug", slug).single();
 
-      const { data: folders } = await supabase
-        .from("categories")
-        .select("*")
-        .eq("company_id", company.id)
-        .order("name");
+      if (companyError) throw new Error(`Company not found: ${companyError.message}`);
 
-      const { data: assets } = await supabase
-        .from("assets")
-        .select("*")
-        .eq("company_id", company.id)
-        .order("name");
+      const { data: folders, error: foldersError } = await supabase
+        .from("categories").select("*").eq("company_id", company.id).order("sort_order").order("name");
+
+      if (foldersError) console.error("Folders fetch error:", foldersError.message);
+
+      const { data: assets, error: assetsError } = await supabase
+        .from("assets").select("*").eq("company_id", company.id).order("name");
+
+      if (assetsError) console.error("Assets fetch error:", assetsError.message);
 
       return {
         company,
@@ -492,24 +456,25 @@ function ExplorerPage() {
     },
   });
 
-  const refetch = () =>
-    queryClient.invalidateQueries({ queryKey: ["explorer", slug] });
+  const refetch = () => queryClient.invalidateQueries({ queryKey: ["explorer", slug] });
 
   // ── Folder CRUD ───────────────────────────────────────────────────────────
 
   const handleCreateConfirm = async () => {
     if (!newFolderName.trim() || !data) return;
-    const parentId =
-      creatingInParent === "root" ? null : creatingInParent ?? null;
+    const parentId = creatingInParent === "root" ? null : (creatingInParent ?? null);
 
     const { error } = await supabase.from("categories").insert({
       company_id: data.company.id,
       name: newFolderName.trim(),
+      slug: generateSlug(newFolderName.trim()), // ← required by schema
       parent_id: parentId,
+      sort_order: 99,
     });
 
     if (error) {
-      toast.error("Erro ao criar pasta");
+      console.error("Create folder error:", error);
+      toast.error(`Erro ao criar pasta: ${error.message}`);
     } else {
       toast.success("Pasta criada!");
       refetch();
@@ -518,15 +483,10 @@ function ExplorerPage() {
     setNewFolderName("");
   };
 
-  const handleCreateCancel = () => {
-    setCreatingInParent(undefined);
-    setNewFolderName("");
-  };
+  const handleCreateCancel = () => { setCreatingInParent(undefined); setNewFolderName(""); };
 
-  const handleEditStart = (folder: FolderRow) => {
-    setEditingId(folder.id);
-    setEditingName(folder.name);
-  };
+  const handleEditStart = (folder: FolderRow) => { setEditingId(folder.id); setEditingName(folder.name); };
+  const handleEditCancel = () => { setEditingId(null); setEditingName(""); };
 
   const handleEditConfirm = async (id: string) => {
     if (!editingName.trim()) return;
@@ -535,22 +495,23 @@ function ExplorerPage() {
       .update({ name: editingName.trim() })
       .eq("id", id);
 
-    if (error) toast.error("Erro ao renomear pasta");
-    else { toast.success("Pasta renomeada!"); refetch(); }
-
-    setEditingId(null);
-    setEditingName("");
-  };
-
-  const handleEditCancel = () => {
+    if (error) {
+      console.error("Rename folder error:", error);
+      toast.error(`Erro ao renomear: ${error.message}`);
+    } else {
+      toast.success("Pasta renomeada!");
+      refetch();
+    }
     setEditingId(null);
     setEditingName("");
   };
 
   const handleDeleteFolder = async (id: string) => {
     const { error } = await supabase.from("categories").delete().eq("id", id);
-    if (error) toast.error("Erro ao eliminar pasta");
-    else {
+    if (error) {
+      console.error("Delete folder error:", error);
+      toast.error(`Erro ao eliminar: ${error.message}`);
+    } else {
       toast.success("Pasta eliminada!");
       if (activeFolderId === id) setActiveFolderId(null);
       refetch();
@@ -566,6 +527,7 @@ function ExplorerPage() {
       return;
     }
 
+    const { data: { user } } = await supabase.auth.getUser();
     const fileArray = Array.from(files);
     setUploading(true);
     setUploadProgress({ done: 0, total: fileArray.length });
@@ -574,6 +536,7 @@ function ExplorerPage() {
 
     for (let i = 0; i < fileArray.length; i++) {
       const file = fileArray[i];
+      // Sanitize filename for storage path
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
       const path = `${data.company.id}/${activeFolderId}/${Date.now()}_${safeName}`;
 
@@ -582,41 +545,56 @@ function ExplorerPage() {
         .upload(path, file, { upsert: false });
 
       if (storageError) {
-        toast.error(`Falha: ${file.name}`);
+        console.error("Storage upload error:", storageError);
+        toast.error(`Falha no upload: ${file.name} — ${storageError.message}`);
       } else {
-        await supabase.from("assets").insert({
+        const { error: dbError } = await supabase.from("assets").insert({
           category_id: activeFolderId,
           company_id: data.company.id,
           name: file.name,
           storage_path: path,
+          mime_type: file.type || null,      // ← schema field
+          file_size: file.size || null,      // ← schema field
+          uploaded_by: user?.id ?? null,     // ← schema field
         });
-        successCount++;
+
+        if (dbError) {
+          console.error("Asset DB insert error:", dbError);
+          toast.error(`Erro ao guardar na base de dados: ${file.name}`);
+          // Clean up orphaned storage file
+          await supabase.storage.from("brand-assets").remove([path]);
+        } else {
+          successCount++;
+        }
       }
 
       setUploadProgress({ done: i + 1, total: fileArray.length });
     }
 
     if (successCount > 0) {
-      toast.success(
-        `${successCount} ficheiro${successCount !== 1 ? "s" : ""} enviado${successCount !== 1 ? "s" : ""}!`
-      );
+      toast.success(`${successCount} ficheiro${successCount !== 1 ? "s" : ""} enviado${successCount !== 1 ? "s" : ""}!`);
       refetch();
     }
 
     setUploading(false);
     setUploadProgress(null);
-
-    // Reset input so same file can be re-uploaded
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   // ── File delete ───────────────────────────────────────────────────────────
 
   const handleDeleteAsset = async (asset: AssetRow) => {
-    await supabase.storage.from("brand-assets").remove([asset.storage_path]);
-    const { error } = await supabase.from("assets").delete().eq("id", asset.id);
-    if (error) toast.error("Erro ao eliminar ficheiro");
-    else { toast.success("Ficheiro eliminado!"); refetch(); }
+    const { error: storageError } = await supabase.storage
+      .from("brand-assets").remove([asset.storage_path]);
+    if (storageError) console.warn("Storage delete warning:", storageError.message);
+
+    const { error: dbError } = await supabase.from("assets").delete().eq("id", asset.id);
+    if (dbError) {
+      toast.error(`Erro ao eliminar: ${dbError.message}`);
+    } else {
+      toast.success("Ficheiro eliminado!");
+      refetch();
+    }
     setDeletingAsset(null);
   };
 
@@ -628,19 +606,14 @@ function ExplorerPage() {
   }, []);
 
   const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
-    // Only fire when leaving the drop zone entirely
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-      setIsDragOver(false);
-    }
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDragOver(false);
   }, []);
 
   const handleDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setIsDragOver(false);
-      if (e.dataTransfer.files.length > 0) {
-        uploadFiles(e.dataTransfer.files);
-      }
+      if (e.dataTransfer.files.length > 0) uploadFiles(e.dataTransfer.files);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [activeFolderId, data]
@@ -648,11 +621,9 @@ function ExplorerPage() {
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
-  const rootFolders =
-    data?.folders.filter((f) => f.parent_id === null) ?? [];
+  const rootFolders = data?.folders.filter((f) => f.parent_id === null) ?? [];
   const activeFolder = data?.folders.find((f) => f.id === activeFolderId);
-  const activeAssets =
-    data?.assets.filter((a) => a.category_id === activeFolderId) ?? [];
+  const activeAssets = data?.assets.filter((a) => a.category_id === activeFolderId) ?? [];
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -660,27 +631,22 @@ function ExplorerPage() {
     <div className="flex h-screen bg-[#F8F8F8] font-sans overflow-hidden">
       {/* ── Sidebar ── */}
       <aside className="w-72 flex flex-col bg-white border-r border-gray-100 shrink-0">
-        {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">
             Pastas
           </span>
           <Button
             size="sm"
-            title="Nova pasta raiz"
+            title="Nova pasta"
             className="h-7 w-7 p-0 rounded-lg bg-gray-900 hover:bg-gray-700 text-white"
-            onClick={() => {
-              setCreatingInParent("root");
-              setNewFolderName("");
-            }}
+            onClick={() => { setCreatingInParent("root"); setNewFolderName(""); }}
           >
             <Plus className="h-3.5 w-3.5" />
           </Button>
         </div>
 
-        {/* Folder list */}
         <div className="flex-1 overflow-y-auto py-2 px-2 space-y-0.5">
-          {/* New root folder inline input */}
+          {/* New root folder input */}
           {creatingInParent === "root" && (
             <div className="flex items-center gap-1.5 px-3 py-1.5">
               <Folder className="h-4 w-4 text-gray-400 shrink-0" />
@@ -695,16 +661,10 @@ function ExplorerPage() {
                 className="h-6 text-sm py-0 px-1.5 flex-1 border-gray-300 rounded focus-visible:ring-0 focus-visible:ring-offset-0"
                 placeholder="Nome da pasta..."
               />
-              <button
-                className="p-1 rounded hover:bg-green-100"
-                onClick={handleCreateConfirm}
-              >
+              <button className="p-1 rounded hover:bg-green-100" onClick={handleCreateConfirm}>
                 <Check className="h-3 w-3 text-green-600" />
               </button>
-              <button
-                className="p-1 rounded hover:bg-red-100"
-                onClick={handleCreateCancel}
-              >
+              <button className="p-1 rounded hover:bg-red-100" onClick={handleCreateCancel}>
                 <X className="h-3 w-3 text-red-500" />
               </button>
             </div>
@@ -716,17 +676,11 @@ function ExplorerPage() {
             </div>
           ) : rootFolders.length === 0 && creatingInParent !== "root" ? (
             <div className="text-center py-10">
-              <Folder
-                className="h-8 w-8 text-gray-200 mx-auto mb-2"
-                strokeWidth={1.5}
-              />
+              <Folder className="h-8 w-8 text-gray-200 mx-auto mb-2" strokeWidth={1.5} />
               <p className="text-xs text-gray-400">Sem pastas ainda</p>
               <button
                 className="mt-2 text-xs text-gray-500 hover:text-gray-900 underline underline-offset-2"
-                onClick={() => {
-                  setCreatingInParent("root");
-                  setNewFolderName("");
-                }}
+                onClick={() => { setCreatingInParent("root"); setNewFolderName(""); }}
               >
                 Criar primeira pasta
               </button>
@@ -747,10 +701,7 @@ function ExplorerPage() {
                 onEditCancel={handleEditCancel}
                 onDeleteRequest={setDeletingFolderId}
                 creatingInParent={creatingInParent}
-                onCreateStart={(parentId) => {
-                  setCreatingInParent(parentId);
-                  setNewFolderName("");
-                }}
+                onCreateStart={(parentId) => { setCreatingInParent(parentId); setNewFolderName(""); }}
                 newFolderName={newFolderName}
                 onNewFolderNameChange={setNewFolderName}
                 onCreateConfirm={handleCreateConfirm}
@@ -766,56 +717,44 @@ function ExplorerPage() {
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {activeFolderId ? (
           <>
-            {/* Toolbar */}
             <div className="bg-white border-b border-gray-100 px-8 py-4 flex items-center justify-between shrink-0">
               <div>
-                <h2 className="text-base font-semibold text-gray-900">
-                  {activeFolder?.name}
-                </h2>
+                <h2 className="text-base font-semibold text-gray-900">{activeFolder?.name}</h2>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  {activeAssets.length}{" "}
-                  {activeAssets.length === 1 ? "ficheiro" : "ficheiros"}
+                  {activeAssets.length} {activeAssets.length === 1 ? "ficheiro" : "ficheiros"}
                 </p>
               </div>
-
-              <div className="flex items-center gap-2">
-                {/* Upload progress */}
+              <div className="flex items-center gap-3">
                 {uploading && uploadProgress && (
                   <span className="text-xs text-gray-500 tabular-nums">
                     {uploadProgress.done}/{uploadProgress.total}
                   </span>
                 )}
-
                 <input
                   ref={fileInputRef}
                   type="file"
                   className="hidden"
                   multiple
-                  onChange={(e) => {
-                    if (e.target.files?.length) uploadFiles(e.target.files);
-                  }}
+                  onChange={(e) => { if (e.target.files?.length) uploadFiles(e.target.files); }}
                 />
                 <Button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={uploading}
                   className="bg-gray-900 hover:bg-gray-700 text-white rounded-xl h-9 px-4 gap-2"
                 >
-                  {uploading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Upload className="h-4 w-4" />
-                  )}
+                  {uploading
+                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                    : <Upload className="h-4 w-4" />
+                  }
                   Upload
                 </Button>
               </div>
             </div>
 
-            {/* Drop zone / file grid */}
             <div
               className={cn(
                 "flex-1 overflow-y-auto p-8 transition-all duration-150",
-                isDragOver &&
-                  "bg-blue-50 ring-2 ring-inset ring-blue-300 rounded-xl m-3"
+                isDragOver && "bg-blue-50 ring-2 ring-inset ring-blue-300 rounded-xl m-3"
               )}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
@@ -826,9 +765,7 @@ function ExplorerPage() {
                   <div className="p-4 bg-blue-100 rounded-full">
                     <Upload className="h-8 w-8 text-blue-500" />
                   </div>
-                  <p className="text-sm font-medium text-blue-600">
-                    Soltar para fazer upload
-                  </p>
+                  <p className="text-sm font-medium text-blue-600">Soltar para fazer upload</p>
                 </div>
               ) : activeAssets.length === 0 ? (
                 <div
@@ -838,12 +775,8 @@ function ExplorerPage() {
                   <div className="p-4 bg-gray-100 rounded-full">
                     <Upload className="h-8 w-8 text-gray-400" />
                   </div>
-                  <p className="text-sm font-medium text-gray-500">
-                    Arraste ficheiros para aqui
-                  </p>
-                  <p className="text-xs text-gray-400">
-                    ou clique para escolher ficheiros
-                  </p>
+                  <p className="text-sm font-medium text-gray-500">Arraste ficheiros para aqui</p>
+                  <p className="text-xs text-gray-400">ou clique para escolher</p>
                 </div>
               ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-4 auto-rows-min">
@@ -854,8 +787,6 @@ function ExplorerPage() {
                       onDelete={() => setDeletingAsset(asset)}
                     />
                   ))}
-
-                  {/* Inline upload tile */}
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploading}
@@ -869,26 +800,17 @@ function ExplorerPage() {
             </div>
           </>
         ) : (
-          // Empty state
           <div className="flex-1 flex flex-col items-center justify-center gap-3">
             <div className="p-5 bg-gray-100 rounded-2xl">
-              <Folder
-                className="h-10 w-10 text-gray-400"
-                strokeWidth={1.5}
-              />
+              <Folder className="h-10 w-10 text-gray-400" strokeWidth={1.5} />
             </div>
-            <p className="text-sm font-medium text-gray-600">
-              Selecione uma pasta
-            </p>
-            <p className="text-xs text-gray-400">
-              para visualizar e gerir os ficheiros
-            </p>
+            <p className="text-sm font-medium text-gray-600">Selecione uma pasta</p>
+            <p className="text-xs text-gray-400">para visualizar e gerir os ficheiros</p>
           </div>
         )}
       </main>
 
       {/* ── Modals ── */}
-
       {deletingFolderId && (
         <ConfirmDialog
           title="Eliminar pasta?"
@@ -897,7 +819,6 @@ function ExplorerPage() {
           onCancel={() => setDeletingFolderId(null)}
         />
       )}
-
       {deletingAsset && (
         <ConfirmDialog
           title="Eliminar ficheiro?"
