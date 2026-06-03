@@ -5,7 +5,7 @@ import { useAuth } from "@/lib/auth";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "Brand Hub" },
+      { title: "Eugeen" },
       { name: "description", content: "Portal central de design e branding." },
     ],
   }),

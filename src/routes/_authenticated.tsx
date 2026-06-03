@@ -31,7 +31,7 @@ function AuthLayout() {
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-4 px-6">
           <Link to="/home" className="flex items-center gap-2 font-semibold tracking-tight">
             <span className="h-6 w-6 rounded-md bg-foreground" />
-            <span>Brand Hub</span>
+            <span>Eugeen</span>
           </Link>
           <nav className="flex items-center gap-1">
             <Link to="/home">
